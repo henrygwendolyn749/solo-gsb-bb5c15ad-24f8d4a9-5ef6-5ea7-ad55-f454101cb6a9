@@ -68,9 +68,30 @@
       <div id="compare-summary" class="summary"></div>
       <div id="compare-table-wrap" class="compare-table-wrap"></div>
     </section>
+
+    <section class="panel sizes-panel" id="sizes-panel">
+      <div class="panel-title">
+        <h2>尺码联检</h2>
+        <span id="sizes-state" class="sync-state" aria-live="polite"></span>
+      </div>
+      <p class="sizes-desc">
+        为当前这份行指令录入 2～8 个命名尺码及各自起始针数，点击「开始联检」后每个尺码独立审校，
+        以行×尺码矩阵对比；某尺码短缺或语法错误只阻断该尺码后续行。尺码保存在浏览器本地。
+      </p>
+      <div id="sizes-editor" class="sizes-editor"></div>
+      <div class="sizes-actions">
+        <button id="btn-add-size" type="button" class="btn btn-mini">＋ 添加尺码</button>
+        <button id="btn-run-sizes" type="button" class="btn btn-primary">开始联检</button>
+        <span id="sizes-hint" class="sizes-hint" aria-live="polite"></span>
+      </div>
+      <div id="sizes-summary" class="summary"></div>
+      <div id="sizes-matrix-wrap" class="sizes-matrix-wrap"></div>
+      <div id="sizes-detail" class="sizes-detail"></div>
+    </section>
   </main>
 
   <script src="/static/compare.js"></script>
+  <script src="/static/sizes.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

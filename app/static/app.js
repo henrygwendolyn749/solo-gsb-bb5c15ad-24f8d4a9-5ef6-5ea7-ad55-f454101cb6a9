@@ -4,6 +4,7 @@
 
 const STORAGE_KEY = "knit-review-plan-v1";
 const BASELINE_KEY = "knit-review-baseline-v1";
+const SIZES_KEY = "knit-review-sizes-v1";
 const DEBOUNCE_MS = 250;
 
 const EXAMPLE = {
@@ -36,6 +37,14 @@ const els = {
   compareSummary: document.getElementById("compare-summary"),
   compareTableWrap: document.getElementById("compare-table-wrap"),
   compareState: document.getElementById("compare-state"),
+  sizesEditor: document.getElementById("sizes-editor"),
+  btnAddSize: document.getElementById("btn-add-size"),
+  btnRunSizes: document.getElementById("btn-run-sizes"),
+  sizesHint: document.getElementById("sizes-hint"),
+  sizesState: document.getElementById("sizes-state"),
+  sizesSummary: document.getElementById("sizes-summary"),
+  sizesMatrixWrap: document.getElementById("sizes-matrix-wrap"),
+  sizesDetail: document.getElementById("sizes-detail"),
 };
 
 let state = load() || { start_stitches: 20, rows: [...EXAMPLE.rows] };
@@ -47,6 +56,13 @@ let baselineRows = null;
 let baselineErr = null;
 let debounceTimer = null;
 let reqSeq = 0;
+// 尺码联检：尺码列表持久化在浏览器本地；联检结果仅在点击「开始联检」后更新。
+let sizes = loadSizes() || defaultSizes();
+let sizesResult = null; // { sizes: [{name, start_stitches, rows}], rowTexts: [...] }
+let sizesErr = null;
+let sizesStale = false; // 联检后方案或尺码又被修改，矩阵结果已过期
+let selectedCell = null; // { sizeIdx, rowIdx }
+let sizesReqSeq = 0;
 
 // ---------------------------------------------------------------- 初始化
 function load() {
@@ -63,6 +79,34 @@ function load() {
 
 function persist() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+// ---------------------------------------------------------------- 尺码存取
+function defaultSizes() {
+  const base = state && Number.isInteger(state.start_stitches) ? state.start_stitches : 20;
+  return [
+    { name: "S", start_stitches: base },
+    { name: "M", start_stitches: base + 4 },
+  ];
+}
+
+function loadSizes() {
+  try {
+    const raw = localStorage.getItem(SIZES_KEY);
+    if (!raw) return null;
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr) || arr.length < 2 || arr.length > 8) return null;
+    const ok = arr.every((s) => s && typeof s.name === "string"
+      && Number.isInteger(s.start_stitches) && s.start_stitches >= 0);
+    if (!ok) return null;
+    return arr.map((s) => ({ name: s.name, start_stitches: s.start_stitches }));
+  } catch {
+    return null;
+  }
+}
+
+function persistSizes() {
+  localStorage.setItem(SIZES_KEY, JSON.stringify(sizes));
 }
 
 // ---------------------------------------------------------------- 基线存取
@@ -126,6 +170,7 @@ function renderEditor(focusIndex = -1) {
   state.rows.forEach((text, i) => {
     const wrap = document.createElement("div");
     wrap.className = "row-edit";
+    wrap.dataset.rowIndex = i;
 
     const no = document.createElement("span");
     no.className = "row-no";
@@ -196,6 +241,7 @@ els.add.addEventListener("click", () => {
 // ---------------------------------------------------------------- 分析
 function scheduleAnalyze() {
   persist();
+  markSizesStale();
   clearTimeout(debounceTimer);
   els.sync.textContent = "计算中…";
   els.sync.className = "sync-state pending";
@@ -581,6 +627,238 @@ function renderCompare() {
     `</thead><tbody>${trs.join("")}</tbody></table>`;
 }
 
+// ---------------------------------------------------------------- 尺码联检
+// 分化行定位的纯逻辑在 sizes.js（findSizeDivergenceRow），此处负责尺码编辑、
+// 联检请求与行×尺码矩阵渲染。联检为手动触发；结果展示期间方案或尺码再被修改
+// 时，矩阵标记为「已过期」，需重新点击「开始联检」。
+function markSizesStale() {
+  if (!sizesResult || sizesStale) return;
+  sizesStale = true;
+  els.sizesState.textContent = "方案或尺码已修改，联检结果已过期，请重新联检";
+  els.sizesState.className = "sync-state pending";
+  els.sizesMatrixWrap.classList.add("stale");
+}
+
+function renderSizesEditor() {
+  els.sizesEditor.innerHTML = "";
+  sizes.forEach((sz, i) => {
+    const wrap = document.createElement("div");
+    wrap.className = "size-edit";
+
+    const name = document.createElement("input");
+    name.type = "text";
+    name.value = sz.name;
+    name.placeholder = "名称，如 S";
+    name.maxLength = 20;
+    name.setAttribute("aria-label", `尺码 ${i + 1} 名称`);
+    name.addEventListener("input", () => {
+      sizes[i].name = name.value;
+      persistSizes();
+      markSizesStale();
+    });
+
+    const start = document.createElement("input");
+    start.type = "number";
+    start.min = "0";
+    start.step = "1";
+    start.value = sz.start_stitches;
+    start.title = "起始针数";
+    start.setAttribute("aria-label", `尺码 ${i + 1} 起始针数`);
+    start.addEventListener("input", () => {
+      const v = Number(start.value);
+      sizes[i].start_stitches = Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0;
+      persistSizes();
+      markSizesStale();
+    });
+
+    const del = miniBtn("删除", "删除该尺码", () => {
+      if (sizes.length <= 2) return;
+      sizes.splice(i, 1);
+      renderSizesEditor();
+      persistSizes();
+      markSizesStale();
+    });
+    del.classList.add("danger");
+    del.disabled = sizes.length <= 2;
+
+    wrap.append(name, start, del);
+    els.sizesEditor.appendChild(wrap);
+  });
+  els.btnAddSize.disabled = sizes.length >= 8;
+}
+
+els.btnAddSize.addEventListener("click", () => {
+  if (sizes.length >= 8) return;
+  const last = sizes[sizes.length - 1];
+  sizes.push({ name: "", start_stitches: last ? last.start_stitches + 4 : 20 });
+  renderSizesEditor();
+  persistSizes();
+  markSizesStale();
+  const inputs = els.sizesEditor.querySelectorAll(".size-edit input[type='text']");
+  if (inputs.length) inputs[inputs.length - 1].focus();
+});
+
+function validateSizes() {
+  if (sizes.length < 2 || sizes.length > 8) return "尺码数量需为 2～8 个";
+  const names = sizes.map((s) => s.name.trim());
+  if (names.some((n) => !n)) return "尺码名称不能为空";
+  if (new Set(names).size !== names.length) return "尺码名称不能重复";
+  if (sizes.some((s) => !Number.isInteger(s.start_stitches) || s.start_stitches < 0)) {
+    return "各尺码起始针数需为非负整数";
+  }
+  return null;
+}
+
+els.btnRunSizes.addEventListener("click", async () => {
+  const invalid = validateSizes();
+  if (invalid) {
+    els.sizesHint.textContent = invalid;
+    els.sizesHint.className = "sizes-hint error";
+    return;
+  }
+  els.sizesHint.textContent = "";
+  els.sizesHint.className = "sizes-hint";
+  els.sizesState.textContent = "联检中…";
+  els.sizesState.className = "sync-state pending";
+  const seq = ++sizesReqSeq;
+  try {
+    const resp = await fetch("/api/sizes/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sizes: sizes.map((s) => ({ name: s.name.trim(), start_stitches: s.start_stitches })),
+        rows: state.rows,
+      }),
+    });
+    if (!resp.ok) throw new Error(`服务返回 ${resp.status}`);
+    const data = await resp.json();
+    if (seq !== sizesReqSeq) return; // 已有更新的联检请求，丢弃过期响应
+    sizesResult = { sizes: data.sizes, rowTexts: [...state.rows] };
+    sizesErr = null;
+    sizesStale = false;
+    selectedCell = null;
+  } catch (err) {
+    if (seq !== sizesReqSeq) return;
+    sizesErr = err.message;
+  }
+  renderSizesMatrix();
+});
+
+// 点击矩阵单元格：定位源行（编辑区闪烁）并展示该尺码本行的错误细节。
+function flashEditorRow(i) {
+  const el = els.editor.querySelector(`.row-edit[data-row-index="${i}"]`);
+  if (!el) return;
+  el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  el.classList.remove("flash");
+  void el.offsetWidth; // 重新触发动画
+  el.classList.add("flash");
+}
+
+function renderSizesMatrix() {
+  els.sizesMatrixWrap.classList.toggle("stale", sizesStale || !!(sizesErr && sizesResult));
+  els.sizesDetail.innerHTML = "";
+
+  if (sizesErr && !sizesResult) {
+    els.sizesSummary.innerHTML = "";
+    els.sizesMatrixWrap.innerHTML = "";
+    els.sizesState.textContent = "联检失败：" + sizesErr;
+    els.sizesState.className = "sync-state error";
+    return;
+  }
+  if (!sizesResult) {
+    els.sizesSummary.innerHTML = "";
+    els.sizesMatrixWrap.innerHTML =
+      '<div class="empty-hint">录入 2～8 个尺码后点击「开始联检」，此处将显示行×尺码矩阵。</div>';
+    els.sizesState.textContent = "";
+    els.sizesState.className = "sync-state";
+    return;
+  }
+
+  const szs = sizesResult.sizes;
+  const rowTexts = sizesResult.rowTexts;
+  const divRow = findSizeDivergenceRow(szs);
+
+  const badges = [];
+  badges.push(`尺码 <b>${szs.length}</b> 个`);
+  badges.push(`行数 <b>${rowTexts.length}</b>`);
+  szs.forEach((sz) => {
+    const last = sz.rows[sz.rows.length - 1];
+    const end = rowEndStitches(last);
+    badges.push(`${escapeHtml(sz.name)} 最终针数 <b>${end == null ? "—" : end}</b>`);
+  });
+  if (divRow >= 0) {
+    badges.push(`<span class="warn-text">⚑ 首个尺码分化：第 ${divRow + 1} 行</span>`);
+  } else if (rowTexts.length > 0) {
+    badges.push("各尺码逐行状态一致（行末针数差异不算分化）");
+  }
+  els.sizesSummary.innerHTML = badges.map((b) => `<span class="badge">${b}</span>`).join("");
+
+  els.sizesState.textContent = sizesErr
+    ? `本次联检失败：${sizesErr}（以下为上次成功结果）`
+    : (sizesStale ? "方案或尺码已修改，联检结果已过期，请重新联检" : "联检完成");
+  els.sizesState.className = "sync-state" + (sizesErr ? " error" : (sizesStale ? " pending" : ""));
+
+  if (rowTexts.length === 0) {
+    els.sizesMatrixWrap.innerHTML = '<div class="empty-hint">当前方案没有任何行。</div>';
+    return;
+  }
+
+  let html = '<table class="size-matrix"><thead><tr><th>行</th><th>指令</th>';
+  szs.forEach((sz) => {
+    html += `<th>${escapeHtml(sz.name)}<span class="size-start">起始 ${sz.start_stitches} 针</span></th>`;
+  });
+  html += "</tr></thead><tbody>";
+  for (let i = 0; i < rowTexts.length; i++) {
+    const isDiff = i === divRow;
+    html += `<tr${isDiff ? ' class="size-diff"' : ""}>`;
+    html += `<td class="cmp-no">第 ${i + 1} 行`
+      + (isDiff ? ' <span class="diff-flag">⚑ 首个分化</span>' : "") + "</td>";
+    html += `<td class="cmp-text">${escapeHtml(rowTexts[i]) || '<span class="cmp-absent">（空行）</span>'}</td>`;
+    szs.forEach((sz, si) => {
+      const row = sz.rows[i];
+      const avail = row.status === "blocked" ? "—" : row.available;
+      const end = rowEndStitches(row);
+      const sel = selectedCell && selectedCell.sizeIdx === si && selectedCell.rowIdx === i;
+      html += `<td class="size-cell ${row.status}${sel ? " selected" : ""}"`
+        + ` data-size="${si}" data-row="${i}" title="点击查看尺码 ${escapeHtml(sz.name)} 本行详情">`
+        + `<span class="cmp-status ${row.status}">${STATUS_TEXT[row.status] || row.status}</span>`
+        + `<span class="size-nums">可用 <b>${avail}</b> · 行末 <b>${end == null ? "—" : end}</b></span>`
+        + "</td>";
+    });
+    html += "</tr>";
+  }
+  html += "</tbody></table>";
+  els.sizesMatrixWrap.innerHTML = html;
+
+  els.sizesMatrixWrap.querySelectorAll(".size-cell").forEach((td) => {
+    td.addEventListener("click", () => {
+      selectedCell = { sizeIdx: Number(td.dataset.size), rowIdx: Number(td.dataset.row) };
+      els.sizesMatrixWrap.querySelectorAll(".size-cell.selected")
+        .forEach((c) => c.classList.remove("selected"));
+      td.classList.add("selected");
+      renderSizesDetail();
+      flashEditorRow(selectedCell.rowIdx);
+    });
+  });
+  renderSizesDetail();
+}
+
+// 详情卡：尺码 + 行号 + 该尺码本行的完整审校卡片（源文本高亮、指标、错误信息）。
+function renderSizesDetail() {
+  els.sizesDetail.innerHTML = "";
+  if (!selectedCell || !sizesResult) return;
+  const sz = sizesResult.sizes[selectedCell.sizeIdx];
+  const row = sz && sz.rows ? sz.rows[selectedCell.rowIdx] : null;
+  if (!sz || !row) return;
+
+  const head = document.createElement("div");
+  head.className = "sizes-detail-head";
+  head.innerHTML = `尺码 <b>${escapeHtml(sz.name)}</b>（起始 ${sz.start_stitches} 针）· `
+    + `第 ${selectedCell.rowIdx + 1} 行 · 已在左侧编辑区定位源行`;
+  els.sizesDetail.appendChild(head);
+  els.sizesDetail.appendChild(renderCard(row, selectedCell.rowIdx));
+}
+
 // ---------------------------------------------------------------- 导入导出
 els.btnExample.addEventListener("click", () => {
   state = { start_stitches: EXAMPLE.start_stitches, rows: [...EXAMPLE.rows] };
@@ -634,4 +912,6 @@ els.file.addEventListener("change", () => {
 // ---------------------------------------------------------------- 启动
 renderEditor();
 updateBaselineBar();
+renderSizesEditor();
+renderSizesMatrix();
 scheduleAnalyze();
